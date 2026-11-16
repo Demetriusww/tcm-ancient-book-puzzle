@@ -18,6 +18,16 @@ const module_name = "pythons.js"
 
 var config
 
+const RUNTIME_VERSION = "20261116b"
+const DEFAULT_RUNTIME_ASSETS = {
+    wasm: "cpython312/main.wasm.gz",
+    data: "cpython312/main.data.gz",
+    wasmBytes: 4642725,
+    dataBytes: 4519634,
+    chunkSize: 131072,
+    compressedBytes: 9162359
+}
+
 
 const FETCH_FLAGS = {
     mode:"no-cors",
@@ -55,6 +65,14 @@ if (window.config) {
 } else {
    config = {}
 }
+
+// Keep runtime loading independent from a cached or partially updated host page.
+config.cdn = config.cdn || "./runtime/cdn/"
+config.runtimeAssets = {
+   ...DEFAULT_RUNTIME_ASSETS,
+   ...(config.runtimeAssets || {})
+}
+config.ume_block = 0
 
 if (document.characterSet.toLowerCase() !== "utf-8")
     alert("Host page encoding must be set to UTF-8 with tag :  meta charset=utf-8")
