@@ -2072,11 +2072,11 @@ function runtimeProgress(downloaded, message) {
         infobox.innerText = message || "正在展卷，请稍候...";
 }
 
-async function downloadRuntimeAsset(url, onProgress) {
-    const response = await fetch(url, { cache: "force-cache" });
-    if (!response.ok)
-        throw new Error(`运行资源加载失败：HTTP ${response.status}`);
+function wait(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
+async function readRuntimeResponse(response, onProgress) {
     const total = Number(response.headers.get("content-length")) || 0;
     if (!response.body || !response.body.getReader) {
         const buffer = await response.arrayBuffer();
@@ -2103,6 +2103,136 @@ async function downloadRuntimeAsset(url, onProgress) {
         offset += chunk.byteLength;
     }
     return result;
+}
+
+async function downloadRuntimeRange(url, start, end, onProgress) {
+    const expectedBytes = end - start + 1;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 45000);
+        try {
+            const response = await fetch(url, {
+                cache: "force-cache",
+                headers: { Range: `bytes=${start}-${end}` },
+                signal: controller.signal
+            });
+            if (response.status === 200) {
+                await response.body?.cancel();
+                return null;
+            }
+            if (response.status !== 206)
+                throw new Error(`运行资源分段加载失败：HTTP ${response.status}`);
+
+            const bytes = await readRuntimeResponse(response, (loaded) => onProgress(loaded));
+            if (bytes.byteLength !== expectedBytes)
+                throw new Error(`运行资源分段不完整：${bytes.byteLength}/${expectedBytes}`);
+            return bytes;
+        } catch (error) {
+            onProgress(0);
+            lastError = error;
+            if (attempt < 5)
+                await wait(300 * attempt);
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    throw lastError || new Error("运行资源分段加载失败");
+}
+
+async function downloadRuntimeAssetInParts(url, totalBytes, chunkSize, onProgress) {
+    const partSize = Math.max(65536, Number(chunkSize) || 131072);
+    const partCount = Math.ceil(totalBytes / partSize);
+    const parts = new Array(partCount);
+    const partProgress = new Uint32Array(partCount);
+    let transferred = 0;
+    let nextPart = 0;
+
+    const updatePartProgress = (index, loaded) => {
+        transferred += loaded - partProgress[index];
+        partProgress[index] = loaded;
+        onProgress(transferred, totalBytes);
+    };
+
+    const worker = async () => {
+        while (true) {
+            const index = nextPart;
+            nextPart += 1;
+            if (index >= partCount)
+                return;
+
+            const start = index * partSize;
+            const end = Math.min(totalBytes - 1, start + partSize - 1);
+            const part = await downloadRuntimeRange(
+                url,
+                start,
+                end,
+                (loaded) => updatePartProgress(index, loaded)
+            );
+            if (part === null)
+                return null;
+            parts[index] = part;
+        }
+        return true;
+    };
+
+    const workers = Math.min(6, partCount);
+    const results = await Promise.all(Array.from({ length: workers }, worker));
+    if (results.some((result) => result === null))
+        return null;
+
+    const result = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const part of parts) {
+        result.set(part, offset);
+        offset += part.byteLength;
+    }
+    onProgress(totalBytes, totalBytes);
+    return result;
+}
+
+async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
+    const totalBytes = Number(expectedBytes) || 0;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    let probe = null;
+
+    try {
+        probe = await fetch(url, {
+            cache: "force-cache",
+            headers: { Range: "bytes=0-0" },
+            signal: controller.signal
+        });
+    } catch (error) {
+        console.warn("Range probe failed, falling back to a full download:", error);
+    } finally {
+        clearTimeout(timeout);
+    }
+
+    if (probe?.status === 206 && totalBytes > 0) {
+        await probe.arrayBuffer();
+        const result = await downloadRuntimeAssetInParts(
+            url,
+            totalBytes,
+            config.runtimeAssets?.chunkSize,
+            onProgress
+        );
+        if (result !== null)
+            return result;
+    }
+
+    const response = probe?.status === 200
+        ? probe
+        : await fetch(url, { cache: "force-cache" });
+    if (!response.ok)
+        throw new Error(`运行资源加载失败：HTTP ${response.status}`);
+
+    const bytes = await readRuntimeResponse(response, (loaded, total) => onProgress(loaded, total));
+    if (totalBytes && bytes.byteLength !== totalBytes)
+        throw new Error(`运行资源下载不完整：${bytes.byteLength}/${totalBytes}`);
+    return bytes;
 }
 
 async function inflateRuntimeAsset(bytes) {
@@ -2134,12 +2264,12 @@ async function preloadRuntime(vm) {
     const wasmUrl = config.cdn + assets.wasm;
     const dataUrl = config.cdn + assets.data;
     const [wasmGzip, dataGzip] = await Promise.all([
-        downloadRuntimeAsset(wasmUrl, (loaded) => {
+        downloadRuntimeAsset(wasmUrl, assets.wasmBytes, (loaded) => {
             downloaded += loaded - (report.wasmLoaded || 0);
             report.wasmLoaded = loaded;
             report();
         }),
-        downloadRuntimeAsset(dataUrl, (loaded) => {
+        downloadRuntimeAsset(dataUrl, assets.dataBytes, (loaded) => {
             downloaded += loaded - (report.dataLoaded || 0);
             report.dataLoaded = loaded;
             report();
