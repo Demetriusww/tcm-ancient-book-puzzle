@@ -149,11 +149,19 @@ config = {
     user_canvas : 0,
     user_canvas_managed : 0,
     gui_divider : 1,
-    ume_block : {{cookiecutter.ume_block}},
+    // Browsers may reject the silent autoplay probe even after a real user
+    // gesture. Do not gate game startup on that optional audio handshake.
+    ume_block : 0,
     can_close : {{cookiecutter.can_close}},
     archive : "{{cookiecutter.archive}}",
     gui_debug : 2,
-    cdn : "{{cookiecutter.cdn}}",
+    // Keep the runtime on the same origin so GitHub Pages serves every asset consistently.
+    cdn : "./runtime/cdn/",
+    runtimeAssets : {
+        wasm : "cpython312/main.wasm.gz",
+        data : "cpython312/main.data.gz",
+        compressedBytes : 9162359
+    },
     autorun : {{cookiecutter.autorun}},
     PYBUILD : "{{cookiecutter.PYBUILD}}",
     fb_ar   :  1.3333333,
@@ -214,6 +222,7 @@ function show_infobox() {
         }
 
         * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
 
         #infobox {
             position: fixed;
@@ -242,16 +251,54 @@ function show_infobox() {
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 12px;
+            gap: 14px;
             color: var(--paper);
             font-family: "STKaiti", "KaiTi", "Microsoft YaHei", serif;
             font-size: 18px;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.04em;
             z-index: 20;
+            background:
+                radial-gradient(circle at center, rgba(150, 49, 39, 0.16), transparent 34%),
+                linear-gradient(rgba(20, 16, 13, 0.82), rgba(20, 16, 13, 0.94));
+        }
+
+        .loading-seal {
+            display: grid;
+            place-items: center;
+            width: 76px;
+            height: 76px;
+            color: #f4eedf;
+            background: var(--cinnabar);
+            border: 2px solid rgba(244, 238, 223, 0.8);
+            box-shadow: 0 0 0 7px rgba(150, 49, 39, 0.16);
+            font-size: 42px;
+            font-weight: 800;
+            line-height: 1;
+            animation: loading-breathe 1.8s ease-in-out infinite;
+        }
+
+        #status {
+            margin: 0;
+            color: #f4eedf;
+            font-size: clamp(20px, 2.8vw, 30px);
+            text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
+        }
+
+        #loading-hint {
+            min-height: 1.4em;
+            color: rgba(244, 238, 223, 0.72);
+            font-size: 14px;
+            letter-spacing: 0.08em;
+        }
+
+        @keyframes loading-breathe {
+            0%, 100% { transform: scale(1); box-shadow: 0 0 0 7px rgba(150, 49, 39, 0.16); }
+            50% { transform: scale(1.05); box-shadow: 0 0 0 12px rgba(150, 49, 39, 0.08); }
         }
 
         #progress {
             accent-color: var(--cinnabar);
+            width: min(420px, 72vw);
         }
 
         div.emscripten { text-align: center; }
@@ -270,10 +317,11 @@ function show_infobox() {
             padding: 0;
             margin: 0;
 
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            /* Pygbag centers the canvas with inset positioning and auto margins. */
+            position: fixed !important;
+            inset: 0 !important;
+            margin: auto !important;
+            transform: none !important;
             touch-action: none;
             box-shadow: 0 0 0 1px rgba(177, 139, 68, 0.45),
                         0 22px 60px rgba(0, 0, 0, 0.5);
@@ -339,11 +387,12 @@ function show_infobox() {
 <body>
 
     <div id="transfer" align=center>
-<!--        <div class="spinner" id='spinner'></div> -->
-        <div class="emscripten" id="status">Downloading...</div>
+        <div class="loading-seal" aria-hidden="true">卷</div>
+        <div class="emscripten" id="status">正在展卷...</div>
         <div class="emscripten">
             <progress value="0" max="100" id="progress"></progress>
         </div>
+        <div id="loading-hint">首次进入需载入运行核心，进度会实时更新</div>
     </div>
 
 
@@ -360,7 +409,7 @@ height="{{cookiecutter.height}}px"
     oncontextmenu="event.preventDefault()" tabindex=1 hidden>
     </canvas>
 
-    <div id="infobox">Loading, please wait ...</div>
+    <div id="infobox">正在展卷，请稍候...</div>
 
     <div id=html></div>
 
@@ -425,6 +474,21 @@ frameborder="1"
         console.warn("TODO: panda3d canvas monitor", self, ecw, ech)
     }
 
+    function unlock_media(event) {
+        if (window.MM)
+            window.MM.UME = true
+
+        if (window.__game_media_unlocked)
+            return
+
+        window.__game_media_unlocked = true
+        const silence = new Audio("./runtime/cdn/empty.ogg")
+        silence.volume = 0.01
+        silence.play().catch((error) => {
+            console.warn("Audio remains locked, continuing with canvas input:", error)
+        })
+    }
+
     async function custom_onload(debug_hidden) {
         // this is called before anything python is loaded
         // make your js customization here
@@ -437,6 +501,12 @@ frameborder="1"
         box.hidden =  debug_hidden
 
         show_infobox()
+
+        const unlockOptions = { capture: true, passive: false }
+        window.addEventListener("pointerdown", unlock_media, unlockOptions)
+        window.addEventListener("click", unlock_media, unlockOptions)
+        infobox.addEventListener("pointerdown", unlock_media, unlockOptions)
+        infobox.addEventListener("click", unlock_media, unlockOptions)
 
         const gameCanvas = document.getElementById("canvas")
         gameCanvas.addEventListener("pointerdown", () => gameCanvas.focus())

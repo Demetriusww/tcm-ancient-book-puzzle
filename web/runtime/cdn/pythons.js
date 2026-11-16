@@ -192,11 +192,23 @@ window.addEventListener('unhandledrejection', function(event) {
 })
 
 
+const REMOTE_PYGBAG_CDN = "https://pygame-web.github.io/cdn/";
+
+function local_runtime_url(url) {
+    const value = String(url);
+    if (!value.startsWith(REMOTE_PYGBAG_CDN))
+        return value;
+
+    const path = value.slice(REMOTE_PYGBAG_CDN.length).split(/[?#]/, 1)[0];
+    return new URL(`runtime/cdn/${path}`, document.baseURI).href;
+}
+
 //fileretrieve (binary). TODO: wasm compilation
 window.cross_file = function * cross_file(url, store, flags) {
     cross_file.dlcomplete = 1
     var content = 0
     var response = null
+    url = local_runtime_url(url)
     console.log("Begin.cross_file.fetch", url, flags || FETCH_FLAGS )
 
     fetch(url, flags || FETCH_FLAGS)
@@ -236,6 +248,7 @@ window.cross_file = function * cross_file(url, store, flags) {
 
 
 window.cross_dl = async function cross_dl(url, flags) {
+    url = local_runtime_url(url)
     console.log("cross_dl.fetch", url, flags || FETCH_FLAGS )
     const response = await fetch(url, flags || FETCH_FLAGS )
     checkStatus(response)
@@ -257,6 +270,7 @@ window.cross_dl = async function cross_dl(url, flags) {
 function DEPRECATED_wget_sync(url, store){
     const request = new XMLHttpRequest();
     try {
+        url = local_runtime_url(url);
         request.open('GET', url, false);
         request.send(null);
         if (request.status === 200) {
@@ -476,9 +490,9 @@ const vm = {
         },
 
         locateFile : function(path, prefix) {
-            if (path == "main.data") {
-                const url = (config.cdn || "" )+`${vm.script.interpreter}${config.pydigits}/${path}`
-                console.log(__FILE__,"locateData: "+path+' '+prefix, "->", url);
+            if (path == "main.data" || path == "main.wasm") {
+                const url = config.cdn + `${vm.script.interpreter}${config.pydigits}/${path}`
+                console.log(__FILE__,"locateBinary: "+path+' '+prefix, "->", url);
                 return url;
             } else {
                 console.log(__FILE__,"locateFile: "+path+' '+prefix);
@@ -1263,9 +1277,9 @@ function MM_play(track, loops) {
             MM.UME = true
         }).catch(error => {
             // Media engagement required
-            MM.UME = false
+            MM.UME = Boolean(window.__game_media_unlocked)
             console.error(`** MEDIA USER ACTION REQUIRED [${track.test}] **`)
-            if (track.test && track.test>0) {
+            if (!window.__game_media_unlocked && track.test && track.test>0) {
                 track.test += 1
                 setTimeout(MM_play, 2000, track, loops)
             }
@@ -2039,6 +2053,113 @@ window.addEventListener("message", rx, false);
 //  Window  STARTUP
 // ====================================================================================
 
+function runtimeProgress(downloaded, message) {
+    const statusElement = document.getElementById("status");
+    const progressElement = document.getElementById("progress");
+    const hintElement = document.getElementById("loading-hint");
+    const infobox = document.getElementById("infobox");
+    const assets = config.runtimeAssets || {};
+    const total = Number(assets.compressedBytes) || 1;
+    const percent = Math.min(100, Math.round((downloaded / total) * 100));
+
+    if (statusElement)
+        statusElement.innerText = message || `正在载入运行核心 ${percent}%`;
+    if (progressElement)
+        progressElement.value = percent;
+    if (hintElement)
+        hintElement.innerText = `${(downloaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`;
+    if (infobox)
+        infobox.innerText = message || "正在展卷，请稍候...";
+}
+
+async function downloadRuntimeAsset(url, onProgress) {
+    const response = await fetch(url, { cache: "force-cache" });
+    if (!response.ok)
+        throw new Error(`运行资源加载失败：HTTP ${response.status}`);
+
+    const total = Number(response.headers.get("content-length")) || 0;
+    if (!response.body || !response.body.getReader) {
+        const buffer = await response.arrayBuffer();
+        onProgress(buffer.byteLength, buffer.byteLength || total);
+        return new Uint8Array(buffer);
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done)
+            break;
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress(loaded, total);
+    }
+
+    const result = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return result;
+}
+
+async function inflateRuntimeAsset(bytes) {
+    if (bytes.byteLength < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b)
+        return bytes.buffer;
+    if (typeof DecompressionStream === "undefined")
+        throw new Error("当前浏览器不支持运行时解压，请升级 Chrome、Edge 或 Safari");
+
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return await new Response(stream).arrayBuffer();
+}
+
+async function preloadRuntime(vm) {
+    const assets = config.runtimeAssets;
+    if (!assets || !assets.wasm || !assets.data)
+        return;
+
+    let downloaded = 0;
+    let lastPaint = 0;
+    const report = (message) => {
+        const now = performance.now();
+        if (message || now - lastPaint > 80) {
+            lastPaint = now;
+            runtimeProgress(downloaded, message);
+        }
+    };
+
+    runtimeProgress(0, "正在载入运行核心 0%");
+    const wasmUrl = config.cdn + assets.wasm;
+    const dataUrl = config.cdn + assets.data;
+    const [wasmGzip, dataGzip] = await Promise.all([
+        downloadRuntimeAsset(wasmUrl, (loaded) => {
+            downloaded += loaded - (report.wasmLoaded || 0);
+            report.wasmLoaded = loaded;
+            report();
+        }),
+        downloadRuntimeAsset(dataUrl, (loaded) => {
+            downloaded += loaded - (report.dataLoaded || 0);
+            report.dataLoaded = loaded;
+            report();
+        })
+    ]);
+
+    downloaded = wasmGzip.byteLength + dataGzip.byteLength;
+    runtimeProgress(downloaded, "运行核心已就绪，正在解压...");
+    const [wasmBinary, dataBinary] = await Promise.all([
+        inflateRuntimeAsset(wasmGzip),
+        inflateRuntimeAsset(dataGzip)
+    ]);
+
+    vm.wasmBinary = wasmBinary;
+    vm.getPreloadedPackage = function(name) {
+        return name.endsWith("main.data") ? dataBinary.slice(0) : null;
+    };
+    runtimeProgress(assets.compressedBytes, "正在唤醒岐黄之术...");
+}
+
 async function onload() {
     var debug_hidden = true;
 
@@ -2219,8 +2340,17 @@ async function onload() {
     // Hides mobile browser's address bar when page is done loading.
     setTimeout(function() { window.scrollTo({left:0, top:1080, behaviour :"instant"}) }, 1);
 
-// TODO: error alert if 404 / timeout
     console.warn("Loading python interpreter from", config.executable)
+    try {
+        await preloadRuntime(vm);
+    } catch (error) {
+        console.error("Runtime preload failed:", error);
+        runtimeProgress(0, "载入遇到问题");
+        const hintElement = document.getElementById("loading-hint");
+        if (hintElement)
+            hintElement.innerText = `${error.message}。请刷新页面重试。`;
+        return;
+    }
     jsimport(config.executable)
 }
 
