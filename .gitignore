@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+.venv/
+.venv-web/
+
+# 游戏存档（玩家本地数据，不提交）
+save/
+
+# 网页构建产物与临时文件
+build/
+pygbag-stage/
+menu_before.png
+menu_after.png
+web_check_*
+web_probe_*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
