@@ -44,13 +44,21 @@ jobs:
           --width 1024
           --height 768
           --template web/index.tmpl
+          --cdn ./runtime/cdn/
           pygbag-stage
+
+      - name: Copy browser runtime dependencies
+        run: |
+          cp web/browserfs.min.js pygbag-stage/build/web/browserfs.min.js
+          cp -R web/runtime pygbag-stage/build/web/runtime
 
       - name: Add GitHub Pages marker
         run: touch pygbag-stage/build/web/.nojekyll
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
