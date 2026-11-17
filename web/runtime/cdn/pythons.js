@@ -18,7 +18,7 @@ const module_name = "pythons.js"
 
 var config
 
-const RUNTIME_VERSION = "20261117a"
+const RUNTIME_VERSION = "20261117b"
 const DEFAULT_RUNTIME_ASSETS = {
     wasm: "cpython312/main.wasm.gz",
     data: "cpython312/main.data.gz",
@@ -2127,9 +2127,9 @@ async function downloadRuntimeRange(url, start, end, onProgress) {
     const expectedBytes = end - start + 1;
     let lastError = null;
 
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 45000);
+        const timeout = setTimeout(() => controller.abort(), 90000);
         try {
             const response = await fetch(url, {
                 cache: "force-cache",
@@ -2150,7 +2150,7 @@ async function downloadRuntimeRange(url, start, end, onProgress) {
         } catch (error) {
             onProgress(0);
             lastError = error;
-            if (attempt < 5)
+            if (attempt < 3)
                 await wait(300 * attempt);
         } finally {
             clearTimeout(timeout);
@@ -2214,13 +2214,32 @@ async function downloadRuntimeAssetInParts(url, totalBytes, chunkSize, onProgres
 async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
     const totalBytes = Number(expectedBytes) || 0;
     let lastError = null;
+    const preferParts = totalBytes > 0
+        && window.location.hostname.endsWith("github.io");
 
-    // GitHub Pages can serve Range requests, but its edge cache may take
-    // 10-15 seconds for every 128 KB part. Two full parallel requests are
-    // much faster, so use Range only as a compatibility fallback.
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    // Large un-ranged responses can stay open indefinitely behind GitHub
+    // Pages/Fastly. Range requests are consistently delivered, so use larger
+    // parallel parts there and keep a full request as a compatibility fallback.
+    if (preferParts) {
+        try {
+            const result = await downloadRuntimeAssetInParts(
+                url,
+                totalBytes,
+                1048576,
+                onProgress
+            );
+            if (result !== null)
+                return result;
+        } catch (error) {
+            lastError = error;
+            console.warn("Parallel range download failed, retrying full request:", error);
+            onProgress(0);
+        }
+    }
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 120000);
+        const timeout = setTimeout(() => controller.abort(), 75000);
         try {
             const requestUrl = new URL(url, window.location.href);
             if (attempt > 1)
@@ -2246,7 +2265,7 @@ async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
         } catch (error) {
             lastError = error;
             onProgress(0);
-            if (attempt < 3)
+            if (attempt < 2)
                 await wait(600 * attempt);
         } finally {
             clearTimeout(timeout);
@@ -2269,7 +2288,7 @@ async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
         clearTimeout(timeout);
     }
 
-    if (probe?.status === 206 && totalBytes > 0) {
+    if (!preferParts && probe?.status === 206 && totalBytes > 0) {
         await probe.arrayBuffer();
         const result = await downloadRuntimeAssetInParts(
             url,
@@ -2526,8 +2545,17 @@ async function onload() {
         console.error("Runtime preload failed:", error);
         runtimeProgress(0, "载入遇到问题");
         const hintElement = document.getElementById("loading-hint");
-        if (hintElement)
-            hintElement.innerText = `${error.message}。请刷新页面重试。`;
+        if (hintElement) {
+            hintElement.innerHTML = "";
+            const message = document.createElement("span");
+            message.innerText = `${error.message}。请检查网络后重新载入。`;
+            const retryButton = document.createElement("button");
+            retryButton.type = "button";
+            retryButton.innerText = "重新载入";
+            retryButton.style.cssText = "margin-left:10px;padding:4px 10px;cursor:pointer;";
+            retryButton.addEventListener("click", () => window.location.reload());
+            hintElement.append(message, retryButton);
+        }
         return;
     }
     jsimport(config.executable)
