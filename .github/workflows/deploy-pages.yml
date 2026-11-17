@@ -29,13 +29,16 @@ jobs:
           cache: pip
 
       - name: Install web builder
-        run: python -m pip install pygame==2.6.1 pygbag==0.9.3
+        run: python -m pip install pygame==2.6.1 pygbag==0.9.3 fonttools==4.59.0
 
       - name: Prepare clean game package
         run: |
           mkdir -p pygbag-stage
           cp main.py pygbag.ini pygbag-stage/
           cp -R assets data src pygbag-stage/
+
+      - name: Subset web fonts
+        run: python scripts/subset_web_fonts.py pygbag-stage
 
       - name: Build WebAssembly game
         run: >-

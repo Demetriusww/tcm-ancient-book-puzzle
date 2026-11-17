@@ -18,7 +18,7 @@ const module_name = "pythons.js"
 
 var config
 
-const RUNTIME_VERSION = "20261116b"
+const RUNTIME_VERSION = "20261117a"
 const DEFAULT_RUNTIME_ASSETS = {
     wasm: "cpython312/main.wasm.gz",
     data: "cpython312/main.data.gz",
@@ -2213,18 +2213,58 @@ async function downloadRuntimeAssetInParts(url, totalBytes, chunkSize, onProgres
 
 async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
     const totalBytes = Number(expectedBytes) || 0;
+    let lastError = null;
+
+    // GitHub Pages can serve Range requests, but its edge cache may take
+    // 10-15 seconds for every 128 KB part. Two full parallel requests are
+    // much faster, so use Range only as a compatibility fallback.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 120000);
+        try {
+            const requestUrl = new URL(url, window.location.href);
+            if (attempt > 1)
+                requestUrl.searchParams.set("_runtimeRetry", `${Date.now()}-${attempt}`);
+
+            const response = await fetch(requestUrl, {
+                cache: attempt === 1 ? "force-cache" : "reload",
+                signal: controller.signal
+            });
+            if (!response.ok)
+                throw new Error(`运行资源加载失败：HTTP ${response.status}`);
+
+            const bytes = await readRuntimeResponse(
+                response,
+                (loaded, total) => onProgress(loaded, total)
+            );
+            if (totalBytes && bytes.byteLength !== totalBytes) {
+                throw new Error(
+                    `运行资源下载不完整：${bytes.byteLength}/${totalBytes}`
+                );
+            }
+            return bytes;
+        } catch (error) {
+            lastError = error;
+            onProgress(0);
+            if (attempt < 3)
+                await wait(600 * attempt);
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
     let probe = null;
 
     try {
         probe = await fetch(url, {
-            cache: "force-cache",
+            cache: "reload",
             headers: { Range: "bytes=0-0" },
             signal: controller.signal
         });
     } catch (error) {
-        console.warn("Range probe failed, falling back to a full download:", error);
+        console.warn("Range fallback probe failed:", error);
     } finally {
         clearTimeout(timeout);
     }
@@ -2241,16 +2281,7 @@ async function downloadRuntimeAsset(url, expectedBytes, onProgress) {
             return result;
     }
 
-    const response = probe?.status === 200
-        ? probe
-        : await fetch(url, { cache: "force-cache" });
-    if (!response.ok)
-        throw new Error(`运行资源加载失败：HTTP ${response.status}`);
-
-    const bytes = await readRuntimeResponse(response, (loaded, total) => onProgress(loaded, total));
-    if (totalBytes && bytes.byteLength !== totalBytes)
-        throw new Error(`运行资源下载不完整：${bytes.byteLength}/${totalBytes}`);
-    return bytes;
+    throw lastError || new Error("运行资源加载失败");
 }
 
 async function inflateRuntimeAsset(bytes) {
